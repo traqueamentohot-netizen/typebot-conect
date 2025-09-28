@@ -1,15 +1,12 @@
 # =============================
 # Dockerfile — Bridge + BotGestor + GeoIP + supervisord
-# Base: Debian 12 (bookworm) com Python 3.11
+# Base: Python 3.11 slim
 # =============================
-FROM debian:bookworm-slim
+FROM python:3.11-slim
 
-# ------------ Metadados (opcional)
 LABEL org.opencontainers.image.title="Typebot Bridge + BotGestor" \
-      org.opencontainers.image.source="railway" \
       org.opencontainers.image.description="Bridge FastAPI + Bot Gestor com supervisord e GeoIP"
 
-# ------------ Env globais
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PORT=8080 \
@@ -17,61 +14,43 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONPATH="/app" \
     GEOIP_PATH="/app/GeoLite2-City.mmdb"
 
-# Caminhos LINUX das suas pastas (case-sensitive!)
-# Bridge: contém app_bridge.py
+# Caminhos (case-sensitive) conforme você informou
 ENV BRIDGE_DIR="/app/bot_gestor/bot_gestora/bot_gestao/bot_gestor/typebot_conection/Typebot-conecet/typebot-conect/Typebot-conecet"
-# Bot: contém db.py, fb_google.py, bot.py
 ENV BOT_DIR="${BRIDGE_DIR}/bot_gesto"
-# Exporta para o app (o seu bridge já lê BRIDGE_BOT_DIR)
 ENV BRIDGE_BOT_DIR="${BOT_DIR}"
-# App espera esta env (mapeamos para GEOIP_PATH)
 ENV GEOIP_DB_PATH="${GEOIP_PATH}"
 
 WORKDIR /app
 
-# ------------ 1) Sistema + Python + build deps
+# ---- Sistema
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 python3-venv python3-dev python3-pip \
-    gcc g++ make libpq-dev \
-    curl unzip ca-certificates \
+    build-essential gcc g++ make libpq-dev curl ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
-# ------------ 2) Dependências Python
-# Copiamos primeiro os requirements para cache
-# Se você não tiver os dois arquivos abaixo, una tudo em um único requirements.txt na raiz.
-COPY requirements-bridge.txt /app/requirements-bridge.txt
-# (Opcional) requirements do bot dentro da árvore informada
-# -> ajuste o caminho abaixo se seu requirements do bot estiver em outro lugar,
-#    ou comente estas duas linhas se você centralizou tudo no requirements-bridge.txt
-COPY bot_gestor/bot_gestora/bot_gestao/bot_gestor/typebot_conection/Typebot-conecet/typebot-conect/Typebot-conecet/bot_gesto/requirements.txt /app/requirements-bot.txt
+# ---- Dependências Python (UM arquivo só, na raiz)
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt \
+ && pip install --no-cache-dir supervisor gunicorn uvicorn
 
-RUN pip3 install --break-system-packages --no-cache-dir -r /app/requirements-bridge.txt \
- && if [ -f /app/requirements-bot.txt ]; then pip3 install --break-system-packages --no-cache-dir -r /app/requirements-bot.txt; fi
-
-# ------------ 3) supervisord
-RUN pip3 install --break-system-packages --no-cache-dir supervisor
-
-# ------------ 4) Código
+# ---- Código
 COPY . /app
 
-# Validações de caminho ainda no build (falha cedo se algo estiver diferente)
+# Valida cedo (falha o build se os caminhos estiverem errados)
 RUN test -f "${BRIDGE_DIR}/app_bridge.py" || (echo "❌ app_bridge.py não encontrado em ${BRIDGE_DIR}" && exit 1) \
  && test -d "${BOT_DIR}" || (echo "❌ Pasta do bot não encontrada em ${BOT_DIR}" && exit 1)
 
-# ------------ 5) GeoIP (MaxMind community mirror)
-RUN curl -L -o "${GEOIP_PATH}" \
-    https://github.com/P3TERX/GeoLite.mmdb/releases/latest/download/GeoLite2-City.mmdb \
- || echo "⚠️  GeoIP não baixado; continuando sem GeoIP"
+# ---- GeoIP (opcional)
+RUN curl -fsSL -o "${GEOIP_PATH}" \
+    "https://github.com/P3TERX/GeoLite.mmdb/releases/latest/download/GeoLite2-City.mmdb" \
+ || echo "⚠️ GeoIP não baixado; continuando sem GeoIP"
 
-# ------------ 6) Healthcheck (consulta o /health do Bridge)
+# ---- Healthcheck do Bridge
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=5 \
- CMD curl -fsS "http://127.0.0.1:${PORT}/health" || exit 1
+  CMD curl -fsS "http://127.0.0.1:${PORT}/health" || exit 1
 
-# ------------ 7) Expor portas
 EXPOSE 8080
 
-# ------------ 8) supervisord.conf inline
-# Criamos o arquivo no build para não depender do repositório
+# ---- Cria supervisord.conf inline
 RUN printf "%s\n" \
 "[supervisord]" \
 "nodaemon=true" \
@@ -92,7 +71,7 @@ RUN printf "%s\n" \
 "" \
 "[program:bot]" \
 "directory=${BOT_DIR}" \
-"command=python3 -u bot.py" \
+"command=python -u bot.py" \
 "autostart=true" \
 "autorestart=true" \
 "startretries=3" \
@@ -102,5 +81,4 @@ RUN printf "%s\n" \
 "stderr_logfile_maxbytes=0" \
 > /app/supervisord.conf
 
-# ------------ 9) Entrada
 CMD ["supervisord", "-c", "/app/supervisord.conf"]
